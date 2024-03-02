@@ -21,6 +21,7 @@ export default class StyleTransferDemo {
     this.paintCtx = this.paintCanvas.getContext(
       '2d'
     ) as CanvasRenderingContext2D;
+
     this.engine = new BABYLON.Engine(canvasElement, true);
 
     this.scene = new BABYLON.Scene(this.engine);
@@ -55,7 +56,7 @@ export default class StyleTransferDemo {
     );
     this.renderTargetTexture = new BABYLON.RenderTargetTexture(
       'rtt',
-      255,
+      1024,
       this.scene
     );
     this.renderTargetTexture.renderList.push(this.quadMesh);
@@ -112,77 +113,88 @@ export default class StyleTransferDemo {
     });
   };
 
-  public async applyStyleTransfer(inputTexture: BABYLON.RenderTargetTexture) {
-    if (!(inputTexture && this.quadMesh)) return;
-    this.engine.endFrame();
-    const pixels = (await inputTexture.readPixels()) as Uint8Array;
-    const width = inputTexture.getSize().width;
-    const height = inputTexture.getSize().height;
-    const imageData = new ImageData(
-      new Uint8ClampedArray(pixels),
-      width,
-      height
+  dowanloadImage = (dataURL: string) => {
+    const downloadLink = document.createElement('a');
+    downloadLink.href = dataURL;
+    downloadLink.download = 'stylized-image.png'; // 指定图片名字和格式
+
+    // 触发下载动作
+    downloadLink.click();
+  };
+  public async applyStyleTransfer() {
+    // if (!(inputTexture && this.quadMesh)) return;
+    // // this.engine.endFrame();
+    // const pixels = (await inputTexture.readPixels()) as Uint8Array;
+    // const width = inputTexture.getSize().width;
+    // const height = inputTexture.getSize().height;
+    // const imageData = new ImageData(
+    //   new Uint8ClampedArray(pixels),
+    //   width,
+    //   height
+    // );
+
+    const renderTarget = new BABYLON.RenderTargetTexture(
+      'styleTransferRenderTarget',
+      { width: this.scene.getEngine().getRenderWidth(), height: this.scene.getEngine().getRenderHeight() },
+      this.scene,
+      false
     );
 
-    this.paintCanvas.width = width;
-    this.paintCanvas.height = height;
+    // 将目前场景中的所有网格添加到RenderTargetTexture的渲染列表中
+    renderTarget.renderList = this.scene.meshes;
+    this.scene.customRenderTargets.push(renderTarget);
+    renderTarget.onAfterRenderObservable.add(() => {
+      renderTarget.readPixels().then(async (pixels) => {
+        // 将像素数据转换成Tensor
+        const tensor = tf.browser.fromPixels(new ImageData(new Uint8ClampedArray(pixels), renderTarget.getSize().width, renderTarget.getSize().height))
+        .toFloat()
+        .div(tf.scalar(255)).expandDims();
 
-    this.paintCtx.putImageData(imageData, 0, 0);
+        if (this.styleTransferModel) {
+          // const contentImg = await this.loadImage('/style-img/chicago.jpg');
+          const stylized = await tf.tidy(() => {
+            return this.transformNet.predict([tensor, this.styleBottleneck]).squeeze();
+          });
+          const stylizedImageData = await tf.browser.toPixels(stylized);
 
-    if (this.styleTransferModel) {
-      const stylized = await tf.tidy(() => {
-        return this.transformNet
-          .predict([
-            tf.browser
-              .fromPixels(imageData)
-              .toFloat()
-              .div(tf.scalar(255))
-              .expandDims(),
-            this.styleBottleneck,
-          ])
-          .squeeze();
+          const [height2, width2] = stylized.shape.slice(0, 2);
+          const imageData2 = new ImageData(stylizedImageData, width2, height2);
+          this.paintCanvas.width = width2;
+          this.paintCanvas.height = height2;
+          this.paintCtx.putImageData(imageData2, 0, 0);
+          const dataURL = this.paintCanvas.toDataURL('image/jpeg');
+          this.dowanloadImage(dataURL);
+          const newTexture = new BABYLON.Texture(
+            dataURL,
+            this.scene,
+            true,
+            false,
+            BABYLON.Texture.NEAREST_SAMPLINGMODE,
+            null,
+            null,
+            stylizedImageData,
+            true
+          );
+          if (this.quadMesh.material && this.quadMesh.material instanceof BABYLON.PBRMaterial) {
+            if (this.quadMesh.material.albedoTexture) {
+              this.quadMesh.material.albedoTexture.dispose();
+            }
+            this.quadMesh.material.albedoTexture = newTexture;
+          }
+          stylized.dispose();
+        }
       });
+    });
 
-      const stylizedImageData = await tf.browser.toPixels(stylized);
-      const [height2, width2] = stylized.shape.slice(0, 2);
-      const imageData2 = new ImageData(stylizedImageData, width2, height2);
-      this.paintCanvas.width = width2;
-      this.paintCanvas.height = height2;
-      this.paintCtx.putImageData(imageData2, 0, 0);
-      const dataURL = this.paintCanvas.toDataURL('image/jpeg');
 
-      // const downloadLink = document.createElement('a');
-      // downloadLink.href = dataURL;
-      // downloadLink.download = 'stylized-image.png';
-      // downloadLink.click();
-
-      const newTexture = new BABYLON.Texture(
-        dataURL,
-        this.scene,
-        true,
-        false,
-        BABYLON.Texture.NEAREST_SAMPLINGMODE,
-        null,
-        null,
-        stylizedImageData,
-        true
-      );
-      // this.quadMesh.material.albedoTexture.dispose();
-      this.quadMesh.material.albedoTexture = newTexture;
-      stylized.dispose();
-    }
-
-    this.engine.beginFrame();
+    // this.engine.beginFrame();
   }
 
   public async startRenderLoop() {
     await this.init();
-
-    this.engine.runRenderLoop(() => {
-      this.scene.render();
+    this.scene.onBeforeRenderObservable.add(() => {
+      this.applyStyleTransfer();
     });
-    setTimeout(() => {
-      this.applyStyleTransfer(this.renderTargetTexture);
-    }, 10000);
+    this.scene.render();
   }
 }
